@@ -1,73 +1,56 @@
-// Fixed.sol
-// Hardened version (safe-by-default): SPDX, pragma, naming, checks, reentrancy guard, checked low-level calls
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+// VulnerablePatterns.sol
+// Intentionally vulnerable contract for testing analyzers
+pragma solidity ^0.6.12;
 
-contract CallerFixed {
-    address public immutable fixedAddress;
-    address public storedAddress;
-    uint256 public statevar;
+contract VulnerablePatterns {
+    mapping(address => uint256) public balances;
+    address public owner;
+    address public delegate; // attacker-controlled delegate target
+    uint8 public counter;     // small type for overflow tests
 
-    // simple reentrancy guard
-    uint8 private _status;
-    uint8 private constant _NOT_ENTERED = 1;
-    uint8 private constant _ENTERED = 2;
-
-    event ExternalCall(address indexed target, bool success, bytes data);
-    event StoredAddressUpdated(address indexed oldAddress, address indexed newAddress);
-
-    constructor(address addr) {
-        require(addr != address(0), "Invalid fixed address");
-        fixedAddress = addr;
-        _status = _NOT_ENTERED;
+    constructor() public {
+        owner = msg.sender; // no zero-check (minor)
     }
 
-    modifier nonReentrant() {
-        require(_status != _ENTERED, "Reentrant call");
-        _status = _ENTERED;
-        _;
-        _status = _NOT_ENTERED;
+    // ===== Vulnerability: Integer overflow (pre-0.8 arithmetic) =====
+    function addToCounter(uint8 x) public {
+        // using a small unsigned type in Solidity <0.8 allows overflow
+        counter += x;
     }
 
-    // Example of safe checked low-level call (still low-level, but check result)
-    function thisIsFine() public returns (bool) {
-        (bool success, bytes memory data) = fixedAddress.call("");
-        emit ExternalCall(fixedAddress, success, data);
-        require(success, "External call failed");
-        return success;
+    // ===== Vulnerability: Unchecked external call / Reentrancy =====
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
     }
 
-    // Checks-Effects-Interactions + nonReentrant
-    function reentrancy() public nonReentrant {
-        // effect first
-        statevar = 0;
-
-        // interaction after state effects
-        (bool success, bytes memory data) = fixedAddress.call("");
-        emit ExternalCall(fixedAddress, success, data);
-        require(success, "External call failed");
+    function withdraw(uint256 amount) public {
+        require(balances[msg.sender] >= amount, "insufficient");
+        // External call BEFORE state update -> reentrancy window
+        (bool ok, ) = msg.sender.call{ value: amount }("");
+        require(ok, "transfer failed");
+        balances[msg.sender] -= amount;
     }
 
-    function callUserAddress(address addr) public nonReentrant returns (bool) {
-        require(addr != address(0), "Invalid address");
-        (bool success, bytes memory data) = addr.call("");
-        emit ExternalCall(addr, success, data);
-        require(success, "External call failed");
-        return success;
+    // ===== Vulnerability: Authorization via tx.origin =====
+    function setDelegate(address _d) public {
+        // using tx.origin for auth is insecure (phishing via intermediate contracts)
+        require(tx.origin == owner, "not owner");
+        delegate = _d;
     }
 
-    function callStoredAddress() public nonReentrant returns (bool) {
-        require(storedAddress != address(0), "Stored address not set");
-        (bool success, bytes memory data) = storedAddress.call("");
-        emit ExternalCall(storedAddress, success, data);
-        require(success, "External call failed");
-        return success;
+    // ===== Vulnerability: delegatecall to untrusted/controllable address =====
+    function execDelegate(bytes memory data) public {
+        // delegate can be set by setDelegate — if attacker controls it, they get storage access
+        // no checks on delegate or data
+        delegate.delegatecall(data);
     }
 
-    function setStoredAddress(address addr) public {
-        require(addr != address(0), "Invalid address");
-        address old = storedAddress;
-        storedAddress = addr;
-        emit StoredAddressUpdated(old, addr);
+    // ===== Vulnerability: Unprotected selfdestruct =====
+    function kill() public {
+        // anyone can call selfdestruct here and drain contract to their address
+        selfdestruct(msg.sender);
     }
+
+    // ===== Minor: public mapping exposes balances (info disclosure) =====
+    // mapping is public (balances) — useful/intentional for some tests
 }
